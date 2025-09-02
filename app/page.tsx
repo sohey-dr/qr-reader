@@ -2,6 +2,7 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import { MyBarcodeDetector } from "@/detector";
+import { useToast } from "@/app/components/Toast";
 
 type DecodeState =
   | { status: "idle" }
@@ -14,6 +15,7 @@ export default function Home() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [result, setResult] = useState<DecodeState>({ status: "idle" });
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const { show } = useToast();
 
   const reset = useCallback(() => {
     setFile(null);
@@ -164,9 +166,18 @@ export default function Home() {
                           <button
                             type="button"
                             className="text-xs px-2 py-1 rounded border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
-                            onClick={() =>
-                              navigator.clipboard?.writeText(result.value)
-                            }
+                            onClick={async () => {
+                              try {
+                                if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+                                  await navigator.clipboard.writeText(result.value);
+                                  show("コピーしました");
+                                } else {
+                                  show("クリップボードを使用できません");
+                                }
+                              } catch {
+                                show("コピーに失敗しました");
+                              }
+                            }}
                           >
                             コピー
                           </button>

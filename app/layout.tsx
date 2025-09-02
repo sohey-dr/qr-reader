@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { GoogleAnalytics } from "@next/third-parties/google";
 import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
+import Providers from "./providers";
 
 export const metadata: Metadata = {
   title: "QRリーダー",
@@ -20,7 +21,7 @@ export default function RootLayout({
       </head>
       <body className={`antialiased`}>
         <Analytics />
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
