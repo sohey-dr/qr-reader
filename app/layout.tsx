@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "QRリーダー",
-  description: "QRリーダー",
+  description: "QRコードを読み取り、文字列を取り出します。",
 };
 
 export default function RootLayout({
