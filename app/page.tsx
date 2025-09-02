@@ -452,6 +452,26 @@ export default function Home() {
     const mod = imported as { BrowserQRCodeReader?: ZxingReaderCtor; BrowserMultiFormatReader?: ZxingReaderCtor };
     const Reader = mod.BrowserQRCodeReader ?? mod.BrowserMultiFormatReader;
     if (!Reader) throw new Error("zxing の読み込みに失敗しました。");
+    // TryHarder + format hint if library is available
+    let reader: ZxingReader;
+    try {
+      const lib = (await (eval("import('@zxing/library')") as Promise<{
+        Map: typeof Map;
+        DecodeHintType?: { TRY_HARDER: unknown; POSSIBLE_FORMATS: unknown };
+        BarcodeFormat?: { QR_CODE: unknown };
+      }>));
+      const hints = new lib.Map<unknown, unknown>();
+      if (lib.DecodeHintType && lib.BarcodeFormat) {
+        hints.set(lib.DecodeHintType.TRY_HARDER, true);
+        hints.set(lib.DecodeHintType.POSSIBLE_FORMATS, [lib.BarcodeFormat.QR_CODE]);
+      }
+      // Some builds of @zxing/browser readers accept hints via setHints rather than ctor.
+      const r = new (Reader as unknown as ZxingReaderCtor)();
+      try { (r as unknown as { setHints?: (h: Map<unknown, unknown>) => void }).setHints?.(hints); } catch {}
+      reader = r;
+    } catch {
+      reader = new (Reader as unknown as ZxingReaderCtor)();
+    }
 
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const image = new Image();
@@ -462,7 +482,6 @@ export default function Home() {
     });
 
     // Prefer decode from image element; retry with downscale if needed
-    const reader = new Reader();
     try {
       const result = await (reader.decodeFromImageElement
         ? reader.decodeFromImageElement(img)
