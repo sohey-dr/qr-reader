@@ -2,6 +2,31 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 
+// Minimal types for the BarcodeDetector Web API and jsqr
+type BarcodeFormat = string;
+type DetectedBarcode = { rawValue?: string; format?: string };
+type BarcodeDetectorInstance = {
+  detect: (
+    source:
+      | ImageBitmap
+      | HTMLImageElement
+      | HTMLVideoElement
+      | HTMLCanvasElement
+      | ImageData
+      | Blob
+  ) => Promise<ReadonlyArray<DetectedBarcode>>;
+};
+type BarcodeDetectorCtor = new (opts?: { formats?: BarcodeFormat[] }) => BarcodeDetectorInstance;
+type BarcodeDetectorStatic = BarcodeDetectorCtor & {
+  getSupportedFormats?: () => Promise<BarcodeFormat[]>;
+};
+
+type JsqrFn = (
+  data: Uint8ClampedArray,
+  width: number,
+  height: number
+) => { data?: string } | null;
+
 type DecodeState =
   | { status: "idle" }
   | { status: "decoding" }
@@ -42,14 +67,14 @@ export default function Home() {
 
   const barcodeSupported = useMemo(() => {
     if (typeof window === "undefined") return false;
-    const BD: any = (window as any).BarcodeDetector;
+    const BD = (window as Window & { BarcodeDetector?: BarcodeDetectorStatic }).BarcodeDetector;
     return !!BD;
   }, []);
 
   const decodeWithBarcodeDetector = useCallback(async (f: File) => {
     setResult({ status: "decoding" });
     try {
-      const BD: any = (window as any).BarcodeDetector;
+      const BD = (window as Window & { BarcodeDetector?: BarcodeDetectorStatic }).BarcodeDetector;
       if (!BD) throw new Error("BarcodeDetector API not available");
 
       const formats: string[] = (await BD.getSupportedFormats?.()) || [];
@@ -69,7 +94,7 @@ export default function Home() {
         });
       }
 
-      const barcodes = await detector.detect(source as any);
+      const barcodes = await detector.detect(source);
       if (!barcodes || barcodes.length === 0) {
         throw new Error("QRコードが検出できませんでした。");
       }
@@ -77,8 +102,9 @@ export default function Home() {
       const value = first.rawValue || first.rawValue?.toString?.() || "";
       if (!value) throw new Error("デコード結果が空でした。");
       setResult({ status: "success", value, format: first.format || "qr_code" });
-    } catch (err: any) {
-      setResult({ status: "error", message: err?.message || String(err) });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      setResult({ status: "error", message });
     }
   }, []);
 
@@ -107,17 +133,20 @@ export default function Home() {
       const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
       // Dynamically import jsqr if installed
-      const mod = (await import("jsqr")) as any;
-      const jsQR = mod?.default || mod;
+      const imported = (await import("jsqr")) as unknown;
+      const jsQR: JsqrFn = (typeof imported === "function"
+        ? (imported as JsqrFn)
+        : (imported as { default?: unknown })?.default as JsqrFn);
       if (typeof jsQR !== "function") throw new Error("jsqr の読み込みに失敗しました。");
       const code = jsQR(data, width, height);
       if (!code?.data) throw new Error("QRコードが検出できませんでした（フォールバック）。");
       setResult({ status: "success", value: code.data, format: "qr_code" });
-    } catch (err: any) {
-      const needInstall = /Cannot find module|Cannot resolve module|resolve/i.test(String(err?.message || err));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const needInstall = /Cannot find module|Cannot resolve module|resolve/i.test(message);
       const msg = needInstall
         ? "フォールバック用ライブラリ(jsqr)が未インストールです。必要ならインストール対応します。"
-        : err?.message || String(err);
+        : message;
       setResult({ status: "error", message: msg });
     }
   }, [file, barcodeSupported, decodeWithBarcodeDetector]);
