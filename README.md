@@ -35,6 +35,14 @@ npm i html5-qrcode jsqr
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Tests
+
+Run the detector test (uses Node's built-in test runner and local ZXing WASM):
+
+```bash
+npm test
+```
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

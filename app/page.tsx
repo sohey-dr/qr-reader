@@ -1,42 +1,13 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState } from "react";
-
-// Minimal types for the BarcodeDetector Web API and jsqr
-type BarcodeFormat = string;
-type DetectedBarcode = { rawValue?: string; format?: string };
-type BarcodeDetectorInstance = {
-  detect: (
-    source:
-      | ImageBitmap
-      | HTMLImageElement
-      | HTMLVideoElement
-      | HTMLCanvasElement
-      | ImageData
-      | Blob
-  ) => Promise<ReadonlyArray<DetectedBarcode>>;
-};
-type BarcodeDetectorCtor = new (opts?: { formats?: BarcodeFormat[] }) => BarcodeDetectorInstance;
-type BarcodeDetectorStatic = BarcodeDetectorCtor & {
-  getSupportedFormats?: () => Promise<BarcodeFormat[]>;
-};
-
-type JsqrFn = (
-  data: Uint8ClampedArray,
-  width: number,
-  height: number
-) => { data?: string } | null;
+import { MyBarcodeDetector } from "@/detector";
 
 type DecodeState =
   | { status: "idle" }
   | { status: "decoding" }
   | { status: "success"; value: string; format: string }
   | { status: "error"; message: string };
-// Minimal types for html5-qrcode we use only for scanFile
-type Html5QrcodeLike = new (elementId: string) => {
-  scanFile: (file: File, showImage?: boolean) => Promise<string>;
-  clear?: () => Promise<void> | void;
-};
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
@@ -70,161 +41,23 @@ export default function Home() {
     [onSelectFile]
   );
 
-  const barcodeSupported = useMemo(() => {
-    if (typeof window === "undefined") return false;
-    const BD = (window as Window & { BarcodeDetector?: BarcodeDetectorStatic }).BarcodeDetector;
-    return !!BD;
-  }, []);
-
-  // Attempt with BarcodeDetector and return decoded payload; throws on failure
-  const decodeWithBarcodeDetectorRaw = useCallback(async (f: File) => {
-    const BD = (window as Window & { BarcodeDetector?: BarcodeDetectorStatic }).BarcodeDetector;
-    if (!BD) throw new Error("BarcodeDetector API not available");
-
-    const formats: string[] = (await BD.getSupportedFormats?.()) || [];
-    const canQR = formats.includes("qr_code") || formats.includes("qr");
-    const detector = new BD({ formats: canQR ? ["qr_code"] : undefined });
-
-    // Prefer ImageBitmap for performance
-    let source: ImageBitmap | HTMLImageElement;
-    if ("createImageBitmap" in window) {
-      source = await createImageBitmap(f);
-    } else {
-      source = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = (err) => reject(err);
-        img.src = URL.createObjectURL(f);
-      });
-    }
-
-    const barcodes = await detector.detect(source);
-    if (!barcodes || barcodes.length === 0) {
-      throw new Error("QRコードが検出できませんでした。");
-    }
-    const first = barcodes[0];
-    const value = first.rawValue || first.rawValue?.toString?.() || "";
-    if (!value) throw new Error("デコード結果が空でした。");
-    return { value, format: first.format || "qr_code" } as const;
-  }, []);
-
-  // Attempt with html5-qrcode (scanFile). Returns decoded string; throws on failure
-  const decodeWithHtml5QrcodeRaw = useCallback(async (f: File) => {
-    // Dynamically import so it's optional
-    const imported = (await import("html5-qrcode")) as unknown as {
-      Html5Qrcode?: unknown;
-      default?: unknown;
-    };
-
-    const isCtor = (x: unknown): x is Html5QrcodeLike => typeof x === "function";
-    const extractCtor = (m: { Html5Qrcode?: unknown; default?: unknown }): Html5QrcodeLike | undefined => {
-      if (isCtor(m.Html5Qrcode)) return m.Html5Qrcode;
-      if (m.default && typeof m.default === "object") {
-        const maybe = (m.default as { Html5Qrcode?: unknown }).Html5Qrcode;
-        if (isCtor(maybe)) return maybe;
-      }
-      if (isCtor(m.default)) return m.default as Html5QrcodeLike;
-      return undefined;
-    };
-    const Html5Qrcode = extractCtor(imported);
-
-    if (!Html5Qrcode) {
-      throw new Error("html5-qrcode の読み込みに失敗しました。");
-    }
-
-    const containerId = "html5qrcode-reader";
-    // Ensure a container exists; keep it tiny/offscreen
-    if (!document.getElementById(containerId)) {
-      const el = document.createElement("div");
-      el.id = containerId;
-      el.style.position = "absolute";
-      el.style.width = "1px";
-      el.style.height = "1px";
-      el.style.overflow = "hidden";
-      el.style.clipPath = "inset(50%)";
-      el.style.clip = "rect(1px, 1px, 1px, 1px)";
-      el.style.whiteSpace = "nowrap";
-      el.style.border = "0";
-      el.style.padding = "0";
-      el.style.margin = "-1px";
-      document.body.appendChild(el);
-    }
-
-    const scanner = new Html5Qrcode(containerId);
-    try {
-      const text = await scanner.scanFile(f, false);
-      if (!text) throw new Error("デコードに失敗しました（html5-qrcode）。");
-      return text as string;
-    } finally {
-      try {
-        await scanner.clear?.();
-      } catch {}
-    }
-  }, []);
+  // Our custom detector instance (worker-backed, QR: jsQR + ZXing フォールバック)
+  const detector = useMemo(() => new MyBarcodeDetector({ formats: ["qr_code"] }), []);
 
   const onDecode = useCallback(async () => {
     if (!file) return;
     setResult({ status: "decoding" });
 
-    // 1) Try BarcodeDetector (if available)
-    if (barcodeSupported) {
-      try {
-        const out = await decodeWithBarcodeDetectorRaw(file);
-        setResult({ status: "success", value: out.value, format: out.format });
-        return;
-      } catch {
-        alert("BarcodeDetector API が利用できませんでした。");
-      }
-    } else {
-      alert("BarcodeDetector API が利用できませんでした。");
-    }
-
-    // 2) Try html5-qrcode (optional dependency)
     try {
-      const text = await decodeWithHtml5QrcodeRaw(file);
-      setResult({ status: "success", value: text, format: "qr_code" });
-      return;
-    } catch {
-      // If module not found, we defer to jsqr and surface a helpful error if all fail
-    }
-
-    // 3) Fallback: jsQR
-    try {
-      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const image = new Image();
-        image.onload = () => resolve(image);
-        image.onerror = (err) => reject(err);
-        image.src = URL.createObjectURL(file);
-      });
-
-      const canvas = document.createElement("canvas");
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("Canvas が利用できません。");
-      ctx.drawImage(img, 0, 0);
-      const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-      // Dynamically import jsqr if installed
-      const imported = (await import("jsqr")) as unknown;
-      const jsQR: JsqrFn = (typeof imported === "function"
-        ? (imported as JsqrFn)
-        : (imported as { default?: unknown })?.default as JsqrFn);
-      if (typeof jsQR !== "function") throw new Error("jsqr の読み込みに失敗しました。");
-      const code = jsQR(data, width, height);
-      if (!code?.data) throw new Error("QRコードが検出できませんでした（フォールバック）。");
-      setResult({ status: "success", value: code.data, format: "qr_code" });
+      const results = await detector.detect(file);
+      if (!results?.length) throw new Error("QRコードが検出できませんでした。");
+      const first = results[0];
+      setResult({ status: "success", value: first.rawValue, format: first.format });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      const needInstallHtml5 = /Cannot find module 'html5-qrcode'|html5-qrcode の読み込みに失敗/i.test(message);
-      const needInstallJsqr = /Cannot find module|Cannot resolve module|resolve/i.test(message);
-      const hints: string[] = [];
-      if (needInstallHtml5) hints.push("html5-qrcode をインストールしてください。");
-      if (needInstallJsqr) hints.push("jsqr をインストールしてください。");
-      const suffix = hints.length ? `（${hints.join(" ")}）` : "";
-      setResult({ status: "error", message: `${message}${suffix}` });
+      setResult({ status: "error", message });
     }
-  }, [file, barcodeSupported, decodeWithBarcodeDetectorRaw, decodeWithHtml5QrcodeRaw]);
+  }, [file, detector]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -239,10 +72,10 @@ export default function Home() {
   return (
     <div className="min-h-screen p-8 sm:p-12">
       <main className="mx-auto w-full max-w-2xl flex flex-col gap-6">
-        <h1 className="text-2xl font-semibold tracking-tight">QR デコーダー</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">QRリーダー</h1>
         <p className="text-sm text-black/60 dark:text-white/60">
-          画像ファイル（PNG/JPEG/WebP など）のQRコードをブラウザ内でデコードします。
-          対応ブラウザでは BarcodeDetector API を使用します。
+          画像ファイル（PNG/JPEG/WebP
+          など）のQRコードをブラウザ内でデコードし、抽出された文字列を表示します。
         </p>
 
         <div
@@ -263,16 +96,17 @@ export default function Home() {
                 onChange={onChange}
                 className="block text-sm"
               />
-              {file && (
-                <button
-                  type="button"
-                  onClick={reset}
-                  className="text-sm px-3 py-1.5 rounded-md border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
-                >
-                  クリア
-                </button>
-              )}
             </div>
+
+            {file && (
+              <button
+                type="button"
+                onClick={reset}
+                className="text-sm px-3 py-1.5 rounded-md border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+              >
+                クリア
+              </button>
+            )}
 
             <div className="text-xs text-black/60 dark:text-white/60">
               ドラッグ＆ドロップにも対応しています。
@@ -299,33 +133,40 @@ export default function Home() {
                     disabled={!file || result.status === "decoding"}
                     className="px-3 py-2 text-sm rounded-md bg-foreground text-background disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {result.status === "decoding" ? "デコード中…" : "2. デコードする"}
+                    {result.status === "decoding"
+                      ? "デコード中…"
+                      : "2. 文字列を抽出する"}
                   </button>
 
-                  {!barcodeSupported && (
-                    <div className="text-xs text-amber-700 dark:text-amber-300">
-                      このブラウザでは BarcodeDetector API が無効です。Chrome/Edge での利用を推奨します。
-                      もしくはフォールバック用ライブラリ（html5-qrcode / jsqr）の導入が可能です。
-                    </div>
-                  )}
+                  {/* Uses a custom worker-based detector; no browser API dependency */}
 
                   <div className="rounded-md border border-black/10 dark:border-white/15 p-3 min-h-16 bg-white/60 dark:bg-black/20">
                     {result.status === "idle" && (
-                      <span className="text-sm text-black/60 dark:text-white/60">結果はここに表示されます。</span>
+                      <span className="text-sm text-black/60 dark:text-white/60">
+                        結果はここに表示されます。
+                      </span>
                     )}
                     {result.status === "decoding" && (
                       <span className="text-sm">デコード中…</span>
                     )}
                     {result.status === "success" && (
                       <div className="flex flex-col gap-2">
-                        <div className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60">抽出された文字列</div>
-                        <div className="text-sm break-words whitespace-pre-wrap">{result.value}</div>
+                        <div className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60">
+                          抽出された文字列
+                        </div>
+                        <div className="text-sm break-words whitespace-pre-wrap">
+                          {result.value}
+                        </div>
                         <div className="flex items-center justify-between gap-2">
-                          <div className="text-[11px] text-black/50 dark:text-white/50">format: {result.format}</div>
+                          <div className="text-[11px] text-black/50 dark:text-white/50">
+                            format: {result.format}
+                          </div>
                           <button
                             type="button"
                             className="text-xs px-2 py-1 rounded border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
-                            onClick={() => navigator.clipboard?.writeText(result.value)}
+                            onClick={() =>
+                              navigator.clipboard?.writeText(result.value)
+                            }
                           >
                             コピー
                           </button>
@@ -333,7 +174,9 @@ export default function Home() {
                       </div>
                     )}
                     {result.status === "error" && (
-                      <div className="text-sm text-red-600 dark:text-red-400">{result.message}</div>
+                      <div className="text-sm text-red-600 dark:text-red-400">
+                        {result.message}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -342,12 +185,18 @@ export default function Home() {
           </div>
         </div>
 
+        {/* <section className="rounded-xl border border-black/10 dark:border-white/15 p-4 sm:p-6 bg-black/[.02] dark:bg-white/[.03]">
+          <h2 className="text-sm font-medium mb-3">カメラスキャン（ベータ）</h2>
+          {(() => {
+            const LiveScanner = dynamic(() => import("./components/LiveScanner"), { ssr: false });
+            return <LiveScanner />;
+          })()}
+        </section> */}
+
         <section className="text-xs text-black/60 dark:text-white/60">
           <p className="mb-1 font-medium">動作メモ</p>
           <ul className="list-disc list-inside space-y-1">
             <li>画像はローカルだけで処理され、サーバー送信しません。</li>
-            <li>対応ブラウザでは BarcodeDetector API を利用してQRを検出します。</li>
-            <li>未対応ブラウザ向けのフォールバック（JSライブラリ）も追加可能です。</li>
           </ul>
         </section>
       </main>
