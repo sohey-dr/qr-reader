@@ -78,6 +78,8 @@ export default function Home() {
         <p className="text-sm text-black/60 dark:text-white/60">
           画像ファイル（PNG/JPEG/WebP
           など）のQRコードをブラウザ内でデコードし、抽出された文字列を表示します。
+          <br />
+          画像はブラウザ内で処理され、サーバー送信しません。
         </p>
 
         <div
@@ -168,8 +170,13 @@ export default function Home() {
                             className="text-xs px-2 py-1 rounded border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
                             onClick={async () => {
                               try {
-                                if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-                                  await navigator.clipboard.writeText(result.value);
+                                if (
+                                  typeof navigator !== "undefined" &&
+                                  navigator.clipboard?.writeText
+                                ) {
+                                  await navigator.clipboard.writeText(
+                                    result.value
+                                  );
                                   show("コピーしました");
                                 } else {
                                   show("クリップボードを使用できません");
@@ -203,13 +210,6 @@ export default function Home() {
             return <LiveScanner />;
           })()}
         </section> */}
-
-        <section className="text-xs text-black/60 dark:text-white/60">
-          <p className="mb-1 font-medium">動作メモ</p>
-          <ul className="list-disc list-inside space-y-1">
-            <li>画像はローカルだけで処理され、サーバー送信しません。</li>
-          </ul>
-        </section>
       </main>
     </div>
   );
