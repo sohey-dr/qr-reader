@@ -21,10 +21,12 @@ type BarcodeDetectorStatic = BarcodeDetectorCtor & {
   getSupportedFormats?: () => Promise<BarcodeFormat[]>;
 };
 
+type JsqrOptions = { inversionAttempts?: "dontInvert" | "onlyInvert" | "attemptBoth" | "invertFirst" };
 type JsqrFn = (
   data: Uint8ClampedArray,
   width: number,
-  height: number
+  height: number,
+  options?: JsqrOptions
 ) => { data?: string } | null;
 
 type DecodeState =
@@ -38,6 +40,9 @@ export default function Home() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [result, setResult] = useState<DecodeState>({ status: "idle" });
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const previewBoxRef = useRef<HTMLDivElement | null>(null);
+  const [useGuide, setUseGuide] = useState<boolean>(true);
+  const [guideSize, setGuideSize] = useState<number>(0.6); // relative to min(image dim), 0..1
 
   const reset = useCallback(() => {
     setFile(null);
@@ -72,7 +77,6 @@ export default function Home() {
   }, []);
 
   const decodeWithBarcodeDetector = useCallback(async (f: File) => {
-    setResult({ status: "decoding" });
     try {
       const BD = (window as Window & { BarcodeDetector?: BarcodeDetectorStatic }).BarcodeDetector;
       if (!BD) throw new Error("BarcodeDetector API not available");
@@ -103,53 +107,469 @@ export default function Home() {
       if (!value) throw new Error("デコード結果が空でした。");
       setResult({ status: "success", value, format: first.format || "qr_code" });
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      setResult({ status: "error", message });
+      // Re-throw so caller can fallback to jsQR
+      throw err;
     }
   }, []);
 
-  const onDecode = useCallback(async () => {
-    if (!file) return;
-    if (barcodeSupported) {
-      await decodeWithBarcodeDetector(file);
-      return;
-    }
-    // Fallback: try jsQR dynamically if available
-    setResult({ status: "decoding" });
+  const decodeWithJsqr = useCallback(async (f: File) => {
+    const isHeic = /heic|heif/i.test(f.type || "");
     try {
       const img = await new Promise<HTMLImageElement>((resolve, reject) => {
         const image = new Image();
+        image.crossOrigin = "anonymous";
         image.onload = () => resolve(image);
         image.onerror = (err) => reject(err);
-        image.src = URL.createObjectURL(file);
+        image.src = URL.createObjectURL(f);
       });
 
-      const canvas = document.createElement("canvas");
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("Canvas が利用できません。");
-      ctx.drawImage(img, 0, 0);
-      const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-      // Dynamically import jsqr if installed
       const imported = (await import("jsqr")) as unknown;
       const jsQR: JsqrFn = (typeof imported === "function"
         ? (imported as JsqrFn)
         : (imported as { default?: unknown })?.default as JsqrFn);
       if (typeof jsQR !== "function") throw new Error("jsqr の読み込みに失敗しました。");
-      const code = jsQR(data, width, height);
-      if (!code?.data) throw new Error("QRコードが検出できませんでした（フォールバック）。");
-      setResult({ status: "success", value: code.data, format: "qr_code" });
+
+      // Helper: compute tiles (center-focused grid or guide ROI)
+      const iw = img.naturalWidth;
+      const ih = img.naturalHeight;
+      const minDim = Math.min(iw, ih);
+      type Rect = { sx: number; sy: number; sw: number; sh: number };
+
+      const tiles: Rect[] = [];
+      if (useGuide) {
+        const side = Math.max(50, Math.round(minDim * Math.max(0.2, Math.min(1, guideSize))));
+        const sx = Math.max(0, Math.round((iw - side) / 2));
+        const sy = Math.max(0, Math.round((ih - side) / 2));
+        tiles.push({ sx, sy, sw: Math.min(side, iw - sx), sh: Math.min(side, ih - sy) });
+      } else {
+        // Full image first, then center tiles
+        tiles.push({ sx: 0, sy: 0, sw: iw, sh: ih });
+        const base = Math.round(minDim * 0.6);
+        const centers = [-0.2, 0, 0.2] as const;
+        for (const dx of centers) {
+          for (const dy of centers) {
+            const cx = iw / 2 + dx * minDim;
+            const cy = ih / 2 + dy * minDim;
+            const sx = Math.max(0, Math.round(cx - base / 2));
+            const sy = Math.max(0, Math.round(cy - base / 2));
+            const sw = Math.min(base, iw - sx);
+            const sh = Math.min(base, ih - sy);
+            tiles.push({ sx, sy, sw, sh });
+          }
+        }
+      }
+
+      // Try to estimate a red-dominant ROI (for red QR on dark background)
+      try {
+        const sampleW = Math.min(256, iw);
+        const sampleH = Math.max(1, Math.round((sampleW / iw) * ih));
+        const sCanvas = document.createElement("canvas");
+        sCanvas.width = sampleW;
+        sCanvas.height = sampleH;
+        const sctx = sCanvas.getContext("2d");
+        if (sctx) {
+          sctx.drawImage(img, 0, 0, sampleW, sampleH);
+          const sdata = sctx.getImageData(0, 0, sampleW, sampleH).data;
+          let xMin = sampleW, yMin = sampleH, xMax = -1, yMax = -1;
+          for (let y = 0; y < sampleH; y++) {
+            for (let x = 0; x < sampleW; x++) {
+              const i = (y * sampleW + x) * 4;
+              const r = sdata[i], g = sdata[i + 1], b = sdata[i + 2];
+              // redness metric
+              const rd = r - Math.max(g, b);
+              if (rd > 35) {
+                if (x < xMin) xMin = x;
+                if (x > xMax) xMax = x;
+                if (y < yMin) yMin = y;
+                if (y > yMax) yMax = y;
+              }
+            }
+          }
+          if (xMax > xMin && yMax > yMin) {
+            // map back to original coords and add margin
+            const mx = iw / sampleW;
+            const my = ih / sampleH;
+            const pad = Math.round(Math.min(iw, ih) * 0.06);
+            const sx = Math.max(0, Math.floor(xMin * mx) - pad);
+            const sy = Math.max(0, Math.floor(yMin * my) - pad);
+            const sw = Math.min(iw - sx, Math.floor((xMax - xMin) * mx) + pad * 2);
+            const sh = Math.min(ih - sy, Math.floor((yMax - yMin) * my) + pad * 2);
+            // Prepend as highest-priority tile
+            tiles.unshift({ sx, sy, sw, sh });
+          }
+        }
+      } catch {}
+
+      // Try multiple scales/rotations with local binarization per tile
+      const maxBaseSide = 2000;
+      const scalesBase = [1, 0.8, 0.6];
+      const rotations = [0, 90, 180, 270];
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) throw new Error("Canvas が利用できません。");
+
+      const binarize = (imgData: ImageData, mode: 'luma' | 'red' | 'green' | 'blue' | 'redness' = 'luma', invert = false) => {
+        const { data, width, height } = imgData;
+        const blocks = Math.max(4, Math.round(Math.min(width, height) / 64));
+        const bx = blocks, by = blocks;
+        const sums = new Array(bx * by).fill(0);
+        const counts = new Array(bx * by).fill(0);
+        for (let y = 0; y < height; y++) {
+          const gy = Math.min(by - 1, Math.floor((y * by) / height));
+          for (let x = 0; x < width; x++) {
+            const gx = Math.min(bx - 1, Math.floor((x * bx) / width));
+            const idx = (y * width + x) * 4;
+            const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+            let l = 0;
+            if (mode === 'redness') {
+              l = Math.max(0, r - Math.max(g, b));
+            } else if (mode === 'red') {
+              l = r;
+            } else if (mode === 'green') {
+              l = g;
+            } else if (mode === 'blue') {
+              l = b;
+            } else {
+              l = (r * 299 + g * 587 + b * 114) / 1000;
+            }
+            const bi = gy * bx + gx;
+            sums[bi] += l;
+            counts[bi]++;
+          }
+        }
+        const means = sums.map((s, i) => s / Math.max(1, counts[i]));
+        const C = 8; // slightly弱めのバイアス
+        for (let y = 0; y < height; y++) {
+          const gy = Math.min(by - 1, Math.floor((y * by) / height));
+          for (let x = 0; x < width; x++) {
+            const gx = Math.min(bx - 1, Math.floor((x * bx) / width));
+            const idx = (y * width + x) * 4;
+            const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+            let l = 0;
+            if (mode === 'redness') {
+              l = Math.max(0, r - Math.max(g, b));
+            } else if (mode === 'red') {
+              l = r;
+            } else if (mode === 'green') {
+              l = g;
+            } else if (mode === 'blue') {
+              l = b;
+            } else {
+              l = (r * 299 + g * 587 + b * 114) / 1000;
+            }
+            const th = means[gy * bx + gx] - C;
+            let v = l > th ? 255 : 0;
+            if (invert) v = v ? 0 : 255;
+            data[idx] = data[idx + 1] = data[idx + 2] = v;
+          }
+        }
+        return imgData;
+      };
+
+      const binarizeOtsu = (imgData: ImageData, mode: 'luma' | 'redness' | 'red' = 'luma', invert = false) => {
+        const { data, width, height } = imgData;
+        const hist = new Array(256).fill(0);
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i], g = data[i + 1], b = data[i + 2];
+          let l = 0;
+          if (mode === 'redness') l = Math.max(0, r - Math.max(g, b));
+          else if (mode === 'red') l = r; else l = (r * 299 + g * 587 + b * 114) / 1000;
+          hist[Math.max(0, Math.min(255, l | 0))]++;
+        }
+        const total = width * height;
+        let sum = 0;
+        for (let t = 0; t < 256; t++) sum += t * hist[t];
+        let sumB = 0, wB = 0, wF = 0, varMax = 0, threshold = 127;
+        for (let t = 0; t < 256; t++) {
+          wB += hist[t];
+          if (wB === 0) continue;
+          wF = total - wB;
+          if (wF === 0) break;
+          sumB += t * hist[t];
+          const mB = sumB / wB;
+          const mF = (sum - sumB) / wF;
+          const varBetween = wB * wF * (mB - mF) * (mB - mF);
+          if (varBetween > varMax) { varMax = varBetween; threshold = t; }
+        }
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i], g = data[i + 1], b = data[i + 2];
+          let l = 0;
+          if (mode === 'redness') l = Math.max(0, r - Math.max(g, b));
+          else if (mode === 'red') l = r; else l = (r * 299 + g * 587 + b * 114) / 1000;
+          let v = l > threshold ? 255 : 0;
+          if (invert) v = v ? 0 : 255;
+          data[i] = data[i + 1] = data[i + 2] = v;
+        }
+        return imgData;
+      };
+
+      const morphClose = (imgData: ImageData) => {
+        const { data, width, height } = imgData;
+        const dil = new Uint8ClampedArray(data.length);
+        // dilation
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            let on = 0;
+            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx, ny = y + dy;
+              if (nx >= 0 && ny >= 0 && nx < width && ny < height) {
+                const idx = (ny * width + nx) * 4;
+                if (data[idx] > 127) { on = 255; dy = 2; dx = 2; break; }
+              }
+            }
+            const i = (y * width + x) * 4;
+            dil[i] = dil[i + 1] = dil[i + 2] = on;
+            dil[i + 3] = 255;
+          }
+        }
+        // erosion
+        const ero = new Uint8ClampedArray(data.length);
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            let on = 255;
+            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx, ny = y + dy;
+              if (nx >= 0 && ny >= 0 && nx < width && ny < height) {
+                const idx = (ny * width + nx) * 4;
+                if (dil[idx] <= 127) { on = 0; dy = 2; dx = 2; break; }
+              }
+            }
+            const i = (y * width + x) * 4;
+            ero[i] = ero[i + 1] = ero[i + 2] = on;
+            ero[i + 3] = 255;
+          }
+        }
+        return new ImageData(ero, width, height);
+      };
+
+      const withQuietZone = (imgData: ImageData, pad = 16, white = true) => {
+        const padded = document.createElement('canvas');
+        padded.width = imgData.width + pad * 2;
+        padded.height = imgData.height + pad * 2;
+        const pctx = padded.getContext('2d');
+        if (!pctx) return imgData;
+        pctx.fillStyle = white ? '#fff' : '#000';
+        pctx.fillRect(0, 0, padded.width, padded.height);
+        const tmp = document.createElement('canvas');
+        tmp.width = imgData.width;
+        tmp.height = imgData.height;
+        const tctx = tmp.getContext('2d');
+        if (!tctx) return imgData;
+        tctx.putImageData(imgData, 0, 0);
+        pctx.drawImage(tmp, pad, pad);
+        return pctx.getImageData(0, 0, padded.width, padded.height);
+      };
+
+      let decoded: string | null = null;
+      outer: for (const tile of tiles) {
+        const longest = Math.max(tile.sw, tile.sh);
+        const baseScale = Math.min(1, maxBaseSide / longest);
+        const scales = scalesBase.map((t) => baseScale * t).filter((s) => s > 0.2);
+        for (const s of scales) {
+          const w0 = Math.max(1, Math.round(tile.sw * s));
+          const h0 = Math.max(1, Math.round(tile.sh * s));
+          for (const deg of rotations) {
+            const rad = (deg * Math.PI) / 180;
+            const rotatedW = deg % 180 === 0 ? w0 : h0;
+            const rotatedH = deg % 180 === 0 ? h0 : w0;
+            canvas.width = rotatedW;
+            canvas.height = rotatedH;
+            ctx.imageSmoothingEnabled = false;
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, rotatedW, rotatedH);
+            ctx.translate(rotatedW / 2, rotatedH / 2);
+            ctx.rotate(rad);
+            ctx.drawImage(
+              img,
+              tile.sx,
+              tile.sy,
+              tile.sw,
+              tile.sh,
+              -w0 / 2,
+              -h0 / 2,
+              w0,
+              h0
+            );
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+            // Build candidates: luma/red binarized, with/without inversion and with quiet zone
+            const base = ctx.getImageData(0, 0, rotatedW, rotatedH);
+            const variants: ImageData[] = [];
+            const makeLocal = (mode: 'luma'|'red'|'redness', inv: boolean, pad: boolean, close = false) => {
+              const copy = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
+              let bw = binarize(copy, mode, inv);
+              if (close) bw = morphClose(bw);
+              return pad ? withQuietZone(bw, 24, true) : bw;
+            };
+            const makeOtsu = (mode: 'luma'|'redness'|'red', inv: boolean, pad: boolean, close = false) => {
+              const copy = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
+              let bw = binarizeOtsu(copy, mode, inv);
+              if (close) bw = morphClose(bw);
+              return pad ? withQuietZone(bw, 24, true) : bw;
+            };
+            variants.push(makeLocal('luma', false, false));
+            variants.push(makeLocal('luma', true, false));
+            variants.push(makeLocal('red', false, false));
+            variants.push(makeLocal('red', true, false));
+            variants.push(makeLocal('redness', false, false));
+            variants.push(makeLocal('redness', true, false));
+            variants.push(makeLocal('redness', false, true, true));
+            variants.push(makeOtsu('redness', false, true, true));
+            variants.push(makeOtsu('luma', false, true));
+            variants.push(makeOtsu('red', false, true));
+
+            for (const v of variants) {
+              const code = jsQR(v.data, v.width, v.height, { inversionAttempts: "attemptBoth" });
+              if (code?.data) { decoded = code.data; break outer; }
+            }
+          }
+        }
+      }
+
+      if (!decoded) throw new Error("QRコードが検出できませんでした（フォールバック）。");
+      setResult({ status: "success", value: decoded, format: "qr_code" });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isHeic) {
+        throw new Error("HEIC/HEIF 画像はブラウザの制約で処理できない場合があります。JPEG/PNG でお試しください。");
+      }
+      throw new Error(message);
+    }
+  }, [useGuide, guideSize]);
+
+  const decodeWithZxing = useCallback(async (f: File) => {
+    // Optional stronger fallback using @zxing/browser (if installed)
+    // Use eval(import()) to avoid bundlers requiring the module at build time
+    const imported = (await (eval("import('@zxing/browser')") as Promise<unknown>).catch(() => null));
+    if (!imported) throw new Error("zxing フォールバックが未インストールです。");
+    type ZxingResult = { getText?: () => string; text?: string };
+    type ZxingReader = {
+      decodeFromImageElement?: (img: HTMLImageElement) => Promise<ZxingResult>;
+      decodeFromImage?: (img: HTMLImageElement | HTMLCanvasElement) => Promise<ZxingResult>;
+      decodeFromCanvas?: (canvas: HTMLCanvasElement) => Promise<ZxingResult>;
+    };
+    type ZxingReaderCtor = new () => ZxingReader;
+    const mod = imported as { BrowserQRCodeReader?: ZxingReaderCtor; BrowserMultiFormatReader?: ZxingReaderCtor };
+    const Reader = mod.BrowserQRCodeReader ?? mod.BrowserMultiFormatReader;
+    if (!Reader) throw new Error("zxing の読み込みに失敗しました。");
+
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const image = new Image();
+      image.crossOrigin = "anonymous";
+      image.onload = () => resolve(image);
+      image.onerror = (err) => reject(err);
+      image.src = URL.createObjectURL(f);
+    });
+
+    // Prefer decode from image element; retry with downscale if needed
+    const reader = new Reader();
+    try {
+      const result = await (reader.decodeFromImageElement
+        ? reader.decodeFromImageElement(img)
+        : reader.decodeFromImage?.(img) ?? Promise.reject(new Error("decodeFromImage が利用できません")));
+      const text = result?.getText ? result.getText() : result?.text || "";
+      if (!text) throw new Error("検出結果が空でした。");
+      setResult({ status: "success", value: text, format: "qr_code" });
+      return;
+    } catch {
+      // Try multiple rotations on a resized canvas to help ZXing
+      const maxSide = 2000;
+      const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      const iw = img.naturalWidth;
+      const ih = img.naturalHeight;
+      const minDim = Math.min(iw, ih);
+      const baseSide = Math.round(minDim * (useGuide ? Math.max(0.2, Math.min(1, guideSize)) : 0.8));
+      const crop = useGuide
+        ? { sx: Math.max(0, Math.round((iw - baseSide) / 2)), sy: Math.max(0, Math.round((ih - baseSide) / 2)), sw: Math.min(baseSide, iw), sh: Math.min(baseSide, ih) }
+        : { sx: Math.max(0, Math.round(iw / 2 - baseSide / 2)), sy: Math.max(0, Math.round(ih / 2 - baseSide / 2)), sw: Math.min(baseSide, iw), sh: Math.min(baseSide, ih) };
+      const w0 = Math.max(1, Math.round(crop.sw * scale));
+      const h0 = Math.max(1, Math.round(crop.sh * scale));
+      const rotations = [0, 90, 180, 270];
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) throw new Error("Canvas が利用できません。");
+      ctx.imageSmoothingEnabled = false;
+
+      for (const deg of rotations) {
+        const rad = (deg * Math.PI) / 180;
+        const rw = deg % 180 === 0 ? w0 : h0;
+        const rh = deg % 180 === 0 ? h0 : w0;
+        canvas.width = rw;
+        canvas.height = rh;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, rw, rh);
+        ctx.translate(rw / 2, rh / 2);
+        ctx.rotate(rad);
+        ctx.drawImage(img, crop.sx, crop.sy, crop.sw, crop.sh, -w0 / 2, -h0 / 2, w0, h0);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        // Try plain, then processed variants (redness/quiet zone)
+        const tryDecode = async () => {
+          const res = await (reader.decodeFromCanvas
+            ? reader.decodeFromCanvas(canvas)
+            : reader.decodeFromImage?.(canvas) ?? Promise.reject(new Error("decodeFromImage が利用できません")));
+          const t = res?.getText ? res.getText() : res?.text || "";
+          return t as string;
+        };
+        let text = await tryDecode().catch(() => "");
+        if (text) { setResult({ status: "success", value: text, format: "qr_code" }); return; }
+
+        // Build binary variants similar to jsQR path
+        const base = ctx.getImageData(0, 0, rw, rh);
+        const variants: ImageData[] = [];
+        const makeLocal = (mode: 'luma'|'red'|'redness', inv: boolean, addPad = true) => {
+          const copy = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
+          const bw = (function(){
+            // reuse inline local binarize (simplified luma/red/redness without blocks)
+            const d = copy.data; const w = copy.width; const h = copy.height;
+            // simple Otsu for speed here
+            const hist = new Array(256).fill(0);
+            for (let i=0;i<d.length;i+=4){const r=d[i],g=d[i+1],b=d[i+2];const L=mode==='redness'?Math.max(0,r-Math.max(g,b)):mode==='red'?r:(r*299+g*587+b*114)/1000;hist[Math.max(0,Math.min(255,L|0))]++;}
+            const total=w*h;let sum=0;for(let t=0;t<256;t++)sum+=t*hist[t];let sumB=0,wB=0,varMax=0,thr=127;for(let t=0;t<256;t++){wB+=hist[t];if(!wB)continue;const wF=total-wB;if(!wF)break;sumB+=t*hist[t];const mB=sumB/wB,mF=(sum-sumB)/wF;const vb=wB*wF*(mB-mF)*(mB-mF);if(vb>varMax){varMax=vb;thr=t;}}
+            for (let i=0;i<d.length;i+=4){const r=d[i],g=d[i+1],b=d[i+2];const L=mode==='redness'?Math.max(0,r-Math.max(g,b)):mode==='red'?r:(r*299+g*587+b*114)/1000;let v=L>thr?255:0;if(inv)v=v?0:255;d[i]=d[i+1]=d[i+2]=v;}
+            return copy;
+          })();
+          // quiet zone
+          if (!addPad) return bw;
+          const padPx = 24; const can = document.createElement('canvas'); can.width=bw.width+padPx*2; can.height=bw.height+padPx*2; const c=can.getContext('2d'); if(!c) return bw; c.fillStyle='#fff'; c.fillRect(0,0,can.width,can.height); const tmp=document.createElement('canvas'); tmp.width=bw.width; tmp.height=bw.height; (tmp.getContext('2d') as CanvasRenderingContext2D).putImageData(bw,0,0); c.drawImage(tmp,padPx,padPx); return c.getImageData(0,0,can.width,can.height);
+        };
+        variants.push(makeLocal('redness', false));
+        variants.push(makeLocal('redness', true));
+        variants.push(makeLocal('red', false));
+        for (const v of variants) {
+          ctx.canvas.width = v.width; ctx.canvas.height = v.height; ctx.putImageData(v,0,0);
+          text = await tryDecode().catch(() => "");
+          if (text) { setResult({ status: "success", value: text, format: "qr_code" }); return; }
+        }
+      }
+      throw new Error("QRコードが検出できませんでした（zxing フォールバック）。");
+    }
+  }, [useGuide, guideSize]);
+
+  const onDecode = useCallback(async () => {
+    if (!file) return;
+    setResult({ status: "decoding" });
+    try {
+      if (barcodeSupported) {
+        try {
+          await decodeWithBarcodeDetector(file);
+          return;
+        } catch {}
+      }
+      // Prefer ZXing if available; otherwise jsQR
+      try {
+        await decodeWithZxing(file);
+        return;
+      } catch {}
+      await decodeWithJsqr(file);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       const needInstall = /Cannot find module|Cannot resolve module|resolve/i.test(message);
       const msg = needInstall
-        ? "フォールバック用ライブラリ(jsqr)が未インストールです。必要ならインストール対応します。"
+        ? "フォールバック用ライブラリ（zxing もしくは jsqr）が未インストールです。必要ならインストール対応します。"
         : message;
       setResult({ status: "error", message: msg });
     }
-  }, [file, barcodeSupported, decodeWithBarcodeDetector]);
+  }, [file, barcodeSupported, decodeWithBarcodeDetector, decodeWithJsqr, decodeWithZxing]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -184,7 +604,8 @@ export default function Home() {
                 id="file"
                 ref={inputRef}
                 type="file"
-                accept="image/*"
+                // Mobile-friendly capture hint (most browsers open camera)
+                accept="image/*;capture=camera"
                 onChange={onChange}
                 className="block text-sm"
               />
@@ -206,15 +627,28 @@ export default function Home() {
             {previewUrl && (
               <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
                 <figure className="rounded-lg overflow-hidden border border-black/10 dark:border-white/15 bg-white/40 dark:bg-black/20">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={previewUrl}
-                    alt={file?.name || "preview"}
-                    className="w-full h-auto object-contain"
-                  />
-                  <figcaption className="text-xs p-2 text-black/60 dark:text-white/60">
-                    プレビュー
-                  </figcaption>
+                  <div ref={previewBoxRef} className="relative w-full aspect-video sm:aspect-square bg-white/40 dark:bg-black/20">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={previewUrl}
+                      alt={file?.name || "preview"}
+                      className="absolute inset-0 w-full h-full object-contain"
+                    />
+                    {useGuide && (
+                      <div className="absolute inset-0 pointer-events-none">
+                        <div
+                          className="absolute border-2 border-emerald-500/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)] rounded"
+                          style={{
+                            width: `${Math.round(guideSize * 100)}%`,
+                            paddingBottom: `${Math.round(guideSize * 100)}%`,
+                            left: `${(1 - guideSize) * 50}%`,
+                            top: `${(1 - guideSize) * 50}%`,
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                  <figcaption className="text-xs p-2 text-black/60 dark:text-white/60">プレビュー（中央ガイド枠）</figcaption>
                 </figure>
 
                 <div className="flex flex-col gap-3">
@@ -224,8 +658,23 @@ export default function Home() {
                     disabled={!file || result.status === "decoding"}
                     className="px-3 py-2 text-sm rounded-md bg-foreground text-background disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {result.status === "decoding" ? "デコード中…" : "2. デコードする"}
+                    {result.status === "decoding" ? "デコード中…" : "2. 抽出する"}
                   </button>
+                  <label className="flex items-center gap-2 text-xs text-black/80 dark:text-white/80">
+                    <input type="checkbox" checked={useGuide} onChange={(e) => setUseGuide(e.target.checked)} />
+                    ガイド枠で自動クロップして解析
+                  </label>
+                  <div className="flex items-center gap-2 text-xs text-black/60 dark:text-white/60">
+                    <label className="min-w-20">枠サイズ</label>
+                    <input
+                      type="range"
+                      min={30}
+                      max={100}
+                      value={Math.round(guideSize * 100)}
+                      onChange={(e) => setGuideSize(Number(e.target.value) / 100)}
+                    />
+                    <span className="tabular-nums">{Math.round(guideSize * 100)}%</span>
+                  </div>
 
                   {!barcodeSupported && (
                     <div className="text-xs text-amber-700 dark:text-amber-300">
