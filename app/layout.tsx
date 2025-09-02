@@ -17,6 +17,10 @@ export default function RootLayout({
   return (
     <html lang="ja">
       <head>
+        <meta
+          name="google-site-verification"
+          content={process.env.GOOGLE_SITE_VERIFICATION}
+        />
         <GoogleAnalytics gaId="G-ZKN8P3KR1R" />
       </head>
       <body className={`antialiased`}>
