@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Minimal types for the BarcodeDetector Web API and jsqr
 type BarcodeFormat = string;
@@ -43,6 +43,12 @@ export default function Home() {
   const previewBoxRef = useRef<HTMLDivElement | null>(null);
   const [useGuide, setUseGuide] = useState<boolean>(true);
   const [guideSize, setGuideSize] = useState<number>(0.6); // relative to min(image dim), 0..1
+  // Camera scan mode (mobile-friendly)
+  const [camActive, setCamActive] = useState<boolean>(false);
+  const [camError, setCamError] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const scanRafRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const reset = useCallback(() => {
     setFile(null);
@@ -76,6 +82,25 @@ export default function Home() {
     return !!BD;
   }, []);
 
+  // Helpers to start/stop camera
+  const stopCamera = useCallback(() => {
+    if (scanRafRef.current) { cancelAnimationFrame(scanRafRef.current); scanRafRef.current = null; }
+    const stream = streamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    const v = videoRef.current;
+    if (v) {
+      v.pause();
+      (v as HTMLVideoElement & { srcObject: MediaStream | null }).srcObject = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => stopCamera();
+  }, [stopCamera]);
+
   const decodeWithBarcodeDetector = useCallback(async (f: File) => {
     try {
       const BD = (window as Window & { BarcodeDetector?: BarcodeDetectorStatic }).BarcodeDetector;
@@ -88,7 +113,11 @@ export default function Home() {
       // Prefer ImageBitmap for performance
       let source: ImageBitmap | HTMLImageElement;
       if ("createImageBitmap" in window) {
-        source = await createImageBitmap(f);
+        source = await createImageBitmap(f, {
+          imageOrientation: "from-image", // EXIFの向きを反映
+          colorSpaceConversion: "default", // sRGB へ変換（広色域→sRGB）
+          premultiplyAlpha: "default", // 念のため
+        });
       } else {
         source = await new Promise<HTMLImageElement>((resolve, reject) => {
           const img = new Image();
@@ -141,6 +170,8 @@ export default function Home() {
         const sx = Math.max(0, Math.round((iw - side) / 2));
         const sy = Math.max(0, Math.round((ih - side) / 2));
         tiles.push({ sx, sy, sw: Math.min(side, iw - sx), sh: Math.min(side, ih - sy) });
+        // Always add full image as a fallback so off-center codes still decode on mobile uploads
+        tiles.push({ sx: 0, sy: 0, sw: iw, sh: ih });
       } else {
         // Full image first, then center tiles
         tiles.push({ sx: 0, sy: 0, sw: iw, sh: ih });
@@ -205,7 +236,11 @@ export default function Home() {
       const scalesBase = [1, 0.8, 0.6];
       const rotations = [0, 90, 180, 270];
       const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      const ctx = canvas.getContext("2d", {
+        willReadFrequently: true,
+        colorSpace: "srgb",
+      });
+      ctx!.imageSmoothingEnabled = false;
       if (!ctx) throw new Error("Canvas が利用できません。");
 
       const binarize = (imgData: ImageData, mode: 'luma' | 'red' | 'green' | 'blue' | 'redness' = 'luma', invert = false) => {
@@ -437,6 +472,90 @@ export default function Home() {
     }
   }, [useGuide, guideSize]);
 
+  // Camera scan loop (tries BarcodeDetector → jsQR)
+  const startCameraScan = useCallback(async () => {
+    setCamError(null);
+    setResult({ status: "idle" });
+    try {
+      if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+        throw new Error("このブラウザではカメラが利用できません。");
+      }
+      // iOS requires https (localhost は不可の場合があります)
+      if (typeof location !== "undefined" && location.protocol !== "https:" && location.hostname !== "localhost") {
+        // ユーザーへの注意。動作自体は試みる。
+        console.warn("Camera on iOS typically requires HTTPS.");
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+      streamRef.current = stream;
+      const v = videoRef.current!;
+      (v as HTMLVideoElement & { srcObject: MediaStream | null }).srcObject = stream;
+      v.playsInline = true; // iOS Safari inline
+      v.muted = true; // avoid autoplay block
+      await v.play().catch(() => {});
+
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) throw new Error("Canvas が利用できません。");
+
+      let stopping = false;
+      const loop = async () => {
+        if (stopping) return;
+        const vw = v.videoWidth;
+        const vh = v.videoHeight;
+        if (vw && vh) {
+          // Downscale for speed on mobile
+          const maxSide = 800;
+          const scale = Math.min(1, maxSide / Math.max(vw, vh));
+          const rw = Math.max(1, Math.round(vw * scale));
+          const rh = Math.max(1, Math.round(vh * scale));
+          canvas.width = rw;
+          canvas.height = rh;
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(v, 0, 0, rw, rh);
+
+          try {
+            if (barcodeSupported) {
+              const BD = (window as Window & { BarcodeDetector?: BarcodeDetectorStatic }).BarcodeDetector!;
+              const detector = new BD({ formats: ["qr_code"] });
+              const codes = await detector.detect(canvas);
+              const value = codes?.[0]?.rawValue;
+              if (value) {
+                setResult({ status: "success", value, format: codes?.[0]?.format || "qr_code" });
+                setCamActive(false); stopping = true; stopCamera(); return;
+              }
+            }
+          } catch {}
+
+          try {
+            const imported = (await import("jsqr")) as unknown;
+            const jsQR: JsqrFn = (typeof imported === "function" ? (imported as JsqrFn) : (imported as { default?: unknown })?.default as JsqrFn);
+            const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const code = jsQR(id.data, id.width, id.height, { inversionAttempts: "attemptBoth" });
+            if (code?.data) {
+              setResult({ status: "success", value: code.data, format: "qr_code" });
+              setCamActive(false); stopping = true; stopCamera(); return;
+            }
+          } catch {}
+        }
+        scanRafRef.current = requestAnimationFrame(loop);
+      };
+      scanRafRef.current = requestAnimationFrame(loop);
+      setCamActive(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setCamError(msg);
+      stopCamera();
+    }
+  }, [barcodeSupported, stopCamera]);
+
   const decodeWithZxing = useCallback(async (f: File) => {
     // Optional stronger fallback using @zxing/browser (if installed)
     // Use eval(import()) to avoid bundlers requiring the module at build time
@@ -491,75 +610,77 @@ export default function Home() {
       setResult({ status: "success", value: text, format: "qr_code" });
       return;
     } catch {
-      // Try multiple rotations on a resized canvas to help ZXing
-      const maxSide = 2000;
-      const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
-      const iw = img.naturalWidth;
-      const ih = img.naturalHeight;
-      const minDim = Math.min(iw, ih);
-      const baseSide = Math.round(minDim * (useGuide ? Math.max(0.2, Math.min(1, guideSize)) : 0.8));
-      const crop = useGuide
-        ? { sx: Math.max(0, Math.round((iw - baseSide) / 2)), sy: Math.max(0, Math.round((ih - baseSide) / 2)), sw: Math.min(baseSide, iw), sh: Math.min(baseSide, ih) }
-        : { sx: Math.max(0, Math.round(iw / 2 - baseSide / 2)), sy: Math.max(0, Math.round(ih / 2 - baseSide / 2)), sw: Math.min(baseSide, iw), sh: Math.min(baseSide, ih) };
-      const w0 = Math.max(1, Math.round(crop.sw * scale));
-      const h0 = Math.max(1, Math.round(crop.sh * scale));
-      const rotations = [0, 90, 180, 270];
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      if (!ctx) throw new Error("Canvas が利用できません。");
-      ctx.imageSmoothingEnabled = false;
-
-      for (const deg of rotations) {
-        const rad = (deg * Math.PI) / 180;
-        const rw = deg % 180 === 0 ? w0 : h0;
-        const rh = deg % 180 === 0 ? h0 : w0;
-        canvas.width = rw;
-        canvas.height = rh;
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.clearRect(0, 0, rw, rh);
-        ctx.translate(rw / 2, rh / 2);
-        ctx.rotate(rad);
-        ctx.drawImage(img, crop.sx, crop.sy, crop.sw, crop.sh, -w0 / 2, -h0 / 2, w0, h0);
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        // Try plain, then processed variants (redness/quiet zone)
-        const tryDecode = async () => {
-          const res = await (reader.decodeFromCanvas
-            ? reader.decodeFromCanvas(canvas)
-            : reader.decodeFromImage?.(canvas) ?? Promise.reject(new Error("decodeFromImage が利用できません")));
-          const t = res?.getText ? res.getText() : res?.text || "";
-          return t as string;
-        };
-        let text = await tryDecode().catch(() => "");
-        if (text) { setResult({ status: "success", value: text, format: "qr_code" }); return; }
-
-        // Build binary variants similar to jsQR path
-        const base = ctx.getImageData(0, 0, rw, rh);
-        const variants: ImageData[] = [];
-        const makeLocal = (mode: 'luma'|'red'|'redness', inv: boolean, addPad = true) => {
-          const copy = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
-          const bw = (function(){
-            // reuse inline local binarize (simplified luma/red/redness without blocks)
+      // Helper to try ZXing on a given region with rotations and simple preprocessing
+      const tryRegion = async (region: { sx: number; sy: number; sw: number; sh: number }) => {
+        const maxSide = 2000;
+        const scale = Math.min(1, maxSide / Math.max(region.sw, region.sh));
+        const w0 = Math.max(1, Math.round(region.sw * scale));
+        const h0 = Math.max(1, Math.round(region.sh * scale));
+        const rotations = [0, 90, 180, 270];
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) throw new Error("Canvas が利用できません。");
+        ctx.imageSmoothingEnabled = false;
+        for (const deg of rotations) {
+          const rad = (deg * Math.PI) / 180;
+          const rw = deg % 180 === 0 ? w0 : h0;
+          const rh = deg % 180 === 0 ? h0 : w0;
+          canvas.width = rw;
+          canvas.height = rh;
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, rw, rh);
+          ctx.translate(rw / 2, rh / 2);
+          ctx.rotate(rad);
+          ctx.drawImage(img, region.sx, region.sy, region.sw, region.sh, -w0 / 2, -h0 / 2, w0, h0);
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          // direct
+          const tryDecode = async () => {
+            const res = await (reader.decodeFromCanvas
+              ? reader.decodeFromCanvas(canvas)
+              : reader.decodeFromImage?.(canvas) ?? Promise.reject(new Error("decodeFromImage が利用できません")));
+            const t = res?.getText ? res.getText() : res?.text || "";
+            return t as string;
+          };
+          let text = await tryDecode().catch(() => "");
+          if (text) return text;
+          // simple binarized variants
+          const base = ctx.getImageData(0, 0, rw, rh);
+          const variants: ImageData[] = [];
+          const makeLocal = (mode: 'luma'|'red'|'redness', inv: boolean, addPad = true) => {
+            const copy = new ImageData(new Uint8ClampedArray(base.data), base.width, base.height);
             const d = copy.data; const w = copy.width; const h = copy.height;
-            // simple Otsu for speed here
             const hist = new Array(256).fill(0);
             for (let i=0;i<d.length;i+=4){const r=d[i],g=d[i+1],b=d[i+2];const L=mode==='redness'?Math.max(0,r-Math.max(g,b)):mode==='red'?r:(r*299+g*587+b*114)/1000;hist[Math.max(0,Math.min(255,L|0))]++;}
             const total=w*h;let sum=0;for(let t=0;t<256;t++)sum+=t*hist[t];let sumB=0,wB=0,varMax=0,thr=127;for(let t=0;t<256;t++){wB+=hist[t];if(!wB)continue;const wF=total-wB;if(!wF)break;sumB+=t*hist[t];const mB=sumB/wB,mF=(sum-sumB)/wF;const vb=wB*wF*(mB-mF)*(mB-mF);if(vb>varMax){varMax=vb;thr=t;}}
             for (let i=0;i<d.length;i+=4){const r=d[i],g=d[i+1],b=d[i+2];const L=mode==='redness'?Math.max(0,r-Math.max(g,b)):mode==='red'?r:(r*299+g*587+b*114)/1000;let v=L>thr?255:0;if(inv)v=v?0:255;d[i]=d[i+1]=d[i+2]=v;}
-            return copy;
-          })();
-          // quiet zone
-          if (!addPad) return bw;
-          const padPx = 24; const can = document.createElement('canvas'); can.width=bw.width+padPx*2; can.height=bw.height+padPx*2; const c=can.getContext('2d'); if(!c) return bw; c.fillStyle='#fff'; c.fillRect(0,0,can.width,can.height); const tmp=document.createElement('canvas'); tmp.width=bw.width; tmp.height=bw.height; (tmp.getContext('2d') as CanvasRenderingContext2D).putImageData(bw,0,0); c.drawImage(tmp,padPx,padPx); return c.getImageData(0,0,can.width,can.height);
-        };
-        variants.push(makeLocal('redness', false));
-        variants.push(makeLocal('redness', true));
-        variants.push(makeLocal('red', false));
-        for (const v of variants) {
-          ctx.canvas.width = v.width; ctx.canvas.height = v.height; ctx.putImageData(v,0,0);
-          text = await tryDecode().catch(() => "");
-          if (text) { setResult({ status: "success", value: text, format: "qr_code" }); return; }
+            if (!addPad) return copy;
+            const padPx = 24; const can = document.createElement('canvas'); can.width=copy.width+padPx*2; can.height=copy.height+padPx*2; const c=can.getContext('2d'); if(!c) return copy; c.fillStyle='#fff'; c.fillRect(0,0,can.width,can.height); const tmp=document.createElement('canvas'); tmp.width=copy.width; tmp.height=copy.height; (tmp.getContext('2d') as CanvasRenderingContext2D).putImageData(copy,0,0); c.drawImage(tmp,padPx,padPx); return c.getImageData(0,0,can.width,can.height);
+          };
+          variants.push(makeLocal('redness', false));
+          variants.push(makeLocal('redness', true));
+          variants.push(makeLocal('red', false));
+          for (const v of variants) {
+            ctx.canvas.width = v.width; ctx.canvas.height = v.height; ctx.putImageData(v,0,0);
+            text = await tryDecode().catch(() => "");
+            if (text) return text;
+          }
         }
-      }
+        return "";
+      };
+
+      const iw = img.naturalWidth; const ih = img.naturalHeight; const minDim = Math.min(iw, ih);
+      const baseSide = Math.round(minDim * (useGuide ? Math.max(0.2, Math.min(1, guideSize)) : 0.8));
+      const guideRegion = useGuide
+        ? { sx: Math.max(0, Math.round((iw - baseSide) / 2)), sy: Math.max(0, Math.round((ih - baseSide) / 2)), sw: Math.min(baseSide, iw), sh: Math.min(baseSide, ih) }
+        : { sx: Math.max(0, Math.round(iw / 2 - baseSide / 2)), sy: Math.max(0, Math.round(ih / 2 - baseSide / 2)), sw: Math.min(baseSide, iw), sh: Math.min(baseSide, ih) };
+
+      // 1) Try full image first (common for uploads)
+      let text = await tryRegion({ sx: 0, sy: 0, sw: iw, sh: ih });
+      if (text) { setResult({ status: "success", value: text, format: "qr_code" }); return; }
+      // 2) Then try guided crop
+      text = await tryRegion(guideRegion);
+      if (text) { setResult({ status: "success", value: text, format: "qr_code" }); return; }
+
       throw new Error("QRコードが検出できませんでした（zxing フォールバック）。");
     }
   }, [useGuide, guideSize]);
@@ -623,11 +744,27 @@ export default function Home() {
                 id="file"
                 ref={inputRef}
                 type="file"
-                // Mobile-friendly capture hint (most browsers open camera)
-                accept="image/*;capture=camera"
+                accept="image/*"
                 onChange={onChange}
                 className="block text-sm"
               />
+              {!camActive ? (
+                <button
+                  type="button"
+                  onClick={startCameraScan}
+                  className="text-sm px-3 py-1.5 rounded-md border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+                >
+                  カメラでスキャン
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => { setCamActive(false); stopCamera(); }}
+                  className="text-sm px-3 py-1.5 rounded-md border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+                >
+                  カメラ停止
+                </button>
+              )}
               {file && (
                 <button
                   type="button"
@@ -640,7 +777,7 @@ export default function Home() {
             </div>
 
             <div className="text-xs text-black/60 dark:text-white/60">
-              ドラッグ＆ドロップにも対応しています。
+              ドラッグ＆ドロップにも対応しています。iOS では HEIC 画像だと読み込めない場合があります。カメラ撮影（JPEG）か PNG/JPEG/WebP をご利用ください。
             </div>
 
             {previewUrl && (
@@ -671,6 +808,14 @@ export default function Home() {
                 </figure>
 
                 <div className="flex flex-col gap-3">
+                  {camActive && (
+                    <div className="rounded-md overflow-hidden border border-black/10 dark:border-white/15 bg-black/80 relative">
+                      <video ref={videoRef} className="w-full h-auto block" playsInline muted autoPlay />
+                      {camError && (
+                        <div className="absolute inset-x-0 bottom-0 p-2 text-xs text-red-300 bg-black/60">{camError}</div>
+                      )}
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={onDecode}

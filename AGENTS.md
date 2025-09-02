@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+## Important
+
+タスクを終える際には必ず`npm run build`を実行してください。
+
 ## Project Structure & Module Organization
 - `app/`: Next.js App Router entry. Key files: `layout.tsx`, `page.tsx`, global styles in `app/globals.css`.
 - `public/`: Static assets served at `/` (e.g., `vercel.svg`).
