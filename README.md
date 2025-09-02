@@ -1,4 +1,4 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+QR 画像をアップロードしてブラウザ内でデコードし、結果文字列を表示する Web アプリです。ベースは [Next.js](https://nextjs.org)（App Router）です。
 
 ## Getting Started
 
@@ -16,7 +16,11 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Usage
+
+- 画像ファイル（PNG/JPEG/WebPなど）をアップロード、またはドラッグ＆ドロップします。
+- 対応ブラウザでは BarcodeDetector API を使ってローカルでデコードします（サーバー送信なし）。
+- 未対応ブラウザではフォールバック用のライブラリ追加が必要です（要インストール）。
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
