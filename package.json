@@ -10,6 +10,8 @@
     "test": "node --test detector/__tests__/zxing-decode.test.mjs"
   },
   "dependencies": {
+    "@next/third-parties": "^15.5.2",
+    "@vercel/analytics": "^1.5.0",
     "html5-qrcode": "^2.3.8",
     "jsqr": "^1.4.0",
     "next": "15.5.2",

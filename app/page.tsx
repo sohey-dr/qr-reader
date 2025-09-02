@@ -72,10 +72,10 @@ export default function Home() {
   return (
     <div className="min-h-screen p-8 sm:p-12">
       <main className="mx-auto w-full max-w-2xl flex flex-col gap-6">
-        <h1 className="text-2xl font-semibold tracking-tight">QR デコーダー</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">QRリーダー</h1>
         <p className="text-sm text-black/60 dark:text-white/60">
           画像ファイル（PNG/JPEG/WebP
-          など）のQRコードをブラウザ内でデコードします。
+          など）のQRコードをブラウザ内でデコードし、抽出された文字列を表示します。
         </p>
 
         <div
@@ -135,7 +135,7 @@ export default function Home() {
                   >
                     {result.status === "decoding"
                       ? "デコード中…"
-                      : "2. デコードする"}
+                      : "2. 文字列を抽出する"}
                   </button>
 
                   {/* Uses a custom worker-based detector; no browser API dependency */}

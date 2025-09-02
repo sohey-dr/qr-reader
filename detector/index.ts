@@ -1,3 +1,5 @@
+"use client";
+
 export type { DetectedBarcode, BarcodeFormat } from './types';
 import type { BarcodeFormat as BarcodeFormatT } from './types';
 import { toImageData } from './frame';
