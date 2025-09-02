@@ -20,7 +20,18 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 - 画像ファイル（PNG/JPEG/WebPなど）をアップロード、またはドラッグ＆ドロップします。
 - 対応ブラウザでは BarcodeDetector API を使ってローカルでデコードします（サーバー送信なし）。
-- 未対応ブラウザではフォールバック用のライブラリ追加が必要です（要インストール）。
+- 未対応ブラウザではフォールバック用のライブラリ（`html5-qrcode` または `jsqr`）を使用できます（要インストール）。
+
+### Optional fallbacks
+
+- `html5-qrcode`: 画像ファイルを `scanFile` でデコードするフォールバック。BarcodeDetector が失敗/未対応の際に自動的に試行します。
+- `jsqr`: Canvas ピクセルからの直接デコードによるフォールバック。`html5-qrcode` が見つからない/失敗した場合に試行します。
+
+インストール例:
+
+```bash
+npm i html5-qrcode jsqr
+```
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
