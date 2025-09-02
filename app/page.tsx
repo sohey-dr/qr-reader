@@ -214,7 +214,7 @@ export default function Home() {
                     )}
                     {result.status === "success" && (
                       <div className="flex flex-col gap-2">
-                        <div className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60">Decoded</div>
+                        <div className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60">抽出された文字列</div>
                         <div className="text-sm break-words whitespace-pre-wrap">{result.value}</div>
                         <div className="flex items-center justify-between gap-2">
                           <div className="text-[11px] text-black/50 dark:text-white/50">format: {result.format}</div>
