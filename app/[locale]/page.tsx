@@ -4,7 +4,7 @@ import { locales, type Locale } from "@/i18n/config";
 import HomeClient from "./HomeClient";
 
 type PageProps = {
-  params: { locale: Locale };
+  params: Promise<{ locale: Locale }>;
 };
 
 export async function generateStaticParams() {
@@ -12,7 +12,8 @@ export async function generateStaticParams() {
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
-  const dict = await getDictionary(params.locale);
+  const { locale } = await params;
+  const dict = await getDictionary(locale);
   return {
     title: dict.title,
     description: dict.description,
@@ -20,7 +21,7 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 }
 
 export default async function Page({ params }: PageProps) {
-  const dict = await getDictionary(params.locale);
-  return <HomeClient dict={dict} locale={params.locale} />;
+  const { locale } = await params;
+  const dict = await getDictionary(locale);
+  return <HomeClient dict={dict} locale={locale} />;
 }
-
