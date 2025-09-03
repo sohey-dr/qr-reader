@@ -68,6 +68,17 @@ export default function Home() {
     }
   }, [file, detector]);
 
+  // Utility: detect http(s) URL in decoded text
+  const urlToOpen = useMemo(() => {
+    if (result.status !== "success") return null;
+    const text = result.value?.trim();
+    try {
+      const u = new URL(text);
+      if (u.protocol === "http:" || u.protocol === "https:") return u.toString();
+    } catch {}
+    return null;
+  }, [result]);
+
   const onDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
@@ -121,10 +132,6 @@ export default function Home() {
                 クリア
               </button>
             )}
-
-            <div className="text-xs text-black/60 dark:text-white/60">
-              ドラッグ＆ドロップにも対応しています。
-            </div>
 
             {previewUrl && (
               <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
@@ -198,6 +205,22 @@ export default function Home() {
                           >
                             コピー
                           </button>
+                          {urlToOpen && (
+                            <button
+                              type="button"
+                              className="text-xs px-2 py-1 rounded border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
+                              onClick={() => {
+                                try {
+                                  window.open(urlToOpen, "_blank", "noopener,noreferrer");
+                                } catch {
+                                  // noop
+                                }
+                              }}
+                              aria-label="URLを新しいタブで開く"
+                            >
+                              URLを開く
+                            </button>
+                          )}
                         </div>
                       </div>
                     )}
