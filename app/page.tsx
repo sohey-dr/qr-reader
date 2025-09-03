@@ -211,7 +211,11 @@ export default function Home() {
                               className="text-xs px-2 py-1 rounded border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
                               onClick={() => {
                                 try {
-                                  window.open(urlToOpen, "_blank", "noopener,noreferrer");
+                                  window.open(
+                                    urlToOpen,
+                                    "_blank",
+                                    "noopener,noreferrer"
+                                  );
                                 } catch {
                                   // noop
                                 }
@@ -243,6 +247,12 @@ export default function Home() {
             return <LiveScanner />;
           })()}
         </section> */}
+
+        <section className="text-xs text-black/60 dark:text-white/60">
+          <ul className="list-disc list-inside space-y-1">
+            <p>QRコードは株式会社デンソーウェーブの登録商標です</p>
+          </ul>
+        </section>
       </main>
     </div>
   );
