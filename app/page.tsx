@@ -44,7 +44,10 @@ export default function Home() {
   );
 
   // Our custom detector instance (worker-backed, QR: jsQR + ZXing フォールバック)
-  const detector = useMemo(() => new MyBarcodeDetector({ formats: ["qr_code"] }), []);
+  const detector = useMemo(
+    () => new MyBarcodeDetector({ formats: ["qr_code"] }),
+    []
+  );
 
   const onDecode = useCallback(async () => {
     if (!file) return;
@@ -54,18 +57,25 @@ export default function Home() {
       const results = await detector.detect(file);
       if (!results?.length) throw new Error("QRコードが検出できませんでした。");
       const first = results[0];
-      setResult({ status: "success", value: first.rawValue, format: first.format });
+      setResult({
+        status: "success",
+        value: first.rawValue,
+        format: first.format,
+      });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       setResult({ status: "error", message });
     }
   }, [file, detector]);
 
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    const f = e.dataTransfer.files?.[0];
-    if (f) onSelectFile(f);
-  }, [onSelectFile]);
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      const f = e.dataTransfer.files?.[0];
+      if (f) onSelectFile(f);
+    },
+    [onSelectFile]
+  );
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
