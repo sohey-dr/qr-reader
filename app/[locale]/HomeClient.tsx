@@ -3,6 +3,9 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { MyBarcodeDetector } from "@/detector";
 import { useToast } from "@/app/components/Toast";
+import type { Dictionary } from "@/i18n/dictionaries";
+import type { Locale } from "@/i18n/config";
+import LanguageSwitcher from "@/app/components/LanguageSwitcher";
 
 type DecodeState =
   | { status: "idle" }
@@ -10,7 +13,13 @@ type DecodeState =
   | { status: "success"; value: string; format: string }
   | { status: "error"; message: string };
 
-export default function Home() {
+export default function HomeClient({
+  dict,
+  locale,
+}: {
+  dict: Dictionary;
+  locale: Locale;
+}) {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [result, setResult] = useState<DecodeState>({ status: "idle" });
@@ -43,7 +52,6 @@ export default function Home() {
     [onSelectFile]
   );
 
-  // Our custom detector instance (worker-backed, QR: jsQR + ZXing フォールバック)
   const detector = useMemo(
     () => new MyBarcodeDetector({ formats: ["qr_code"] }),
     []
@@ -55,7 +63,7 @@ export default function Home() {
 
     try {
       const results = await detector.detect(file);
-      if (!results?.length) throw new Error("QRコードが検出できませんでした。");
+      if (!results?.length) throw new Error(dict.errors.noQr);
       const first = results[0];
       setResult({
         status: "success",
@@ -66,9 +74,8 @@ export default function Home() {
       const message = err instanceof Error ? err.message : String(err);
       setResult({ status: "error", message });
     }
-  }, [file, detector]);
+  }, [file, detector, dict.errors.noQr]);
 
-  // Utility: detect http(s) URL in decoded text
   const urlToOpen = useMemo(() => {
     if (result.status !== "success") return null;
     const text = result.value?.trim();
@@ -95,12 +102,14 @@ export default function Home() {
   return (
     <div className="min-h-screen p-8 sm:p-12">
       <main className="mx-auto w-full max-w-2xl flex flex-col gap-6">
-        <h1 className="text-2xl font-semibold tracking-tight">QRリーダー</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-semibold tracking-tight">{dict.title}</h1>
+          <LanguageSwitcher />
+        </div>
         <p className="text-sm text-black/60 dark:text-white/60">
-          画像ファイル（PNG/JPEG/WebP
-          など）のQRコードをブラウザ内でデコードし、抽出された文字列を表示します。
+          {dict.intro.line1}
           <br />
-          画像はブラウザ内で処理され、サーバー送信しません。
+          {dict.intro.line2}
         </p>
 
         <div
@@ -110,7 +119,7 @@ export default function Home() {
         >
           <div className="flex flex-col gap-3">
             <label htmlFor="file" className="text-sm font-medium">
-              1. 画像をアップロード
+              {dict.uploadLabel}
             </label>
             <div className="flex items-center gap-2">
               <input
@@ -129,7 +138,7 @@ export default function Home() {
                 onClick={reset}
                 className="text-sm px-3 py-1.5 rounded-md border border-black/10 dark:border-white/15 hover:bg-black/[.04] dark:hover:bg-white/[.06]"
               >
-                クリア
+                {dict.clear}
               </button>
             )}
 
@@ -143,7 +152,7 @@ export default function Home() {
                     className="w-full h-auto object-contain"
                   />
                   <figcaption className="text-xs p-2 text-black/60 dark:text-white/60">
-                    プレビュー
+                    {dict.preview}
                   </figcaption>
                 </figure>
 
@@ -155,32 +164,30 @@ export default function Home() {
                     className="px-3 py-2 text-sm rounded-md bg-foreground text-background disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {result.status === "decoding"
-                      ? "デコード中…"
-                      : "2. 文字列を抽出する"}
+                      ? dict.decodeButton.decoding
+                      : dict.decodeButton.idle}
                   </button>
-
-                  {/* Uses a custom worker-based detector; no browser API dependency */}
 
                   <div className="rounded-md border border-black/10 dark:border-white/15 p-3 min-h-16 bg-white/60 dark:bg-black/20">
                     {result.status === "idle" && (
                       <span className="text-sm text-black/60 dark:text-white/60">
-                        結果はここに表示されます。
+                        {dict.result.placeholder}
                       </span>
                     )}
                     {result.status === "decoding" && (
-                      <span className="text-sm">デコード中…</span>
+                      <span className="text-sm">{dict.decodeButton.decoding}</span>
                     )}
                     {result.status === "success" && (
                       <div className="flex flex-col gap-2">
                         <div className="text-xs uppercase tracking-wide text-black/60 dark:text-white/60">
-                          抽出された文字列
+                          {dict.result.extractedLabel}
                         </div>
                         <div className="text-sm break-words whitespace-pre-wrap">
                           {result.value}
                         </div>
                         <div className="flex items-center justify-between gap-2">
                           <div className="text-[11px] text-black/50 dark:text-white/50">
-                            format: {result.format}
+                            {dict.result.formatLabel}: {result.format}
                           </div>
                           <button
                             type="button"
@@ -194,16 +201,16 @@ export default function Home() {
                                   await navigator.clipboard.writeText(
                                     result.value
                                   );
-                                  show("コピーしました");
+                                  show(dict.toasts.copied);
                                 } else {
-                                  show("クリップボードを使用できません");
+                                  show(dict.toasts.clipboardUnavailable);
                                 }
                               } catch {
-                                show("コピーに失敗しました");
+                                show(dict.toasts.copyFailed);
                               }
                             }}
                           >
-                            コピー
+                            {dict.actions.copy}
                           </button>
                           {urlToOpen && (
                             <button
@@ -220,9 +227,9 @@ export default function Home() {
                                   // noop
                                 }
                               }}
-                              aria-label="URLを新しいタブで開く"
+                              aria-label={dict.actions.openUrlAria}
                             >
-                              URLを開く
+                              {dict.actions.openUrl}
                             </button>
                           )}
                         </div>
@@ -240,20 +247,13 @@ export default function Home() {
           </div>
         </div>
 
-        {/* <section className="rounded-xl border border-black/10 dark:border-white/15 p-4 sm:p-6 bg-black/[.02] dark:bg-white/[.03]">
-          <h2 className="text-sm font-medium mb-3">カメラスキャン（ベータ）</h2>
-          {(() => {
-            const LiveScanner = dynamic(() => import("./components/LiveScanner"), { ssr: false });
-            return <LiveScanner />;
-          })()}
-        </section> */}
-
         <section className="text-xs text-black/60 dark:text-white/60">
           <ul className="list-disc list-inside space-y-1">
-            <p>QRコードは株式会社デンソーウェーブの登録商標です</p>
+            <p>{dict.footnote}</p>
           </ul>
         </section>
       </main>
     </div>
   );
 }
+
